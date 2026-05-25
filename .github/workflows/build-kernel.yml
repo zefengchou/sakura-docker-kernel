@@ -23,7 +23,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
     timeout-minutes: 120
     
     steps:
@@ -104,33 +104,63 @@ jobs:
       - name: Fix DTC
         run: |
           cd kernel
-          rm -rf scripts/dtc/*.o scripts/dtc/*.tab.* scripts/dtc/*.lex.*
+          
+          echo "=== 修复 DTC 编译问题 ==="
+          
+          # 问题分析：
+          # 内核编译 dtc.c 时报错 "libfdt_env.h: No such file or directory"
+          # 解决方案：不编译内核自带的 DTC，直接使用系统预编译的 DTC
+          
+          # 1. 记录原始 DTC 目录内容
+          echo "原始 DTC 目录内容:"
+          ls -la scripts/dtc/
+          
+          # 2. 备份原始 DTC 目录
+          mkdir -p /tmp/dtc_backup
+          cp -r scripts/dtc/* /tmp/dtc_backup/
+          
+          # 3. 彻底清空 DTC 目录
+          rm -rf scripts/dtc/*
+          
+          # 4. 只复制系统预编译的 DTC 二进制文件
           cp /usr/bin/dtc scripts/dtc/dtc
           chmod +x scripts/dtc/dtc
           
+          # 5. 创建 Makefile，完全禁用 DTC 编译
+          # 关键：设置 hostprogs-y 为空，告诉构建系统没有需要编译的程序
           cat > scripts/dtc/Makefile << 'EOF'
-          dtc-objs := dtc.o flattree.o fstree.o data.o livetree.o treesource.o srcpos.o checks.o util.o
+          # DTC (Device Tree Compiler) - 使用系统预编译版本
+          # 不编译内核自带的 DTC 源码，避免 libfdt_env.h 找不到的问题
           
-          hostprogs-$(CONFIG_DTC)	+= dtc
-          
-          always		:= $(hostprogs-y)
-          targets		:= $(dtc-objs)
-          targets		+= dtc-lexer.lex.c dtc-parser.tab.c dtc-parser.tab.h
-          
-          $(obj)/dtc:
-          	cp /usr/bin/dtc $@
-          	chmod +x $@
-          
-          $(obj)/dtc-lexer.lex.c:
-          	touch $@
-          
-          $(obj)/dtc-parser.tab.c $(obj)/dtc-parser.tab.h:
-          	touch $@
-          
-          $(obj)/%.o: $(obj)/%.c
-          	touch $@
+          # 清空所有构建目标
+          hostprogs-y :=
+          always :=
+          targets :=
+          dtc-objs :=
           EOF
-          echo "DTC fixed"
+          
+          # 6. 修改 scripts/Makefile.host，禁用 DTC 编译
+          # 在文件开头添加条件判断，跳过 DTC 编译
+          if grep -q "hostprogs-.*dtc" scripts/Makefile.host; then
+            echo "修改 scripts/Makefile.host 以禁用 DTC 编译..."
+            # 注释掉 DTC 相关的编译规则
+            sed -i 's/^hostprogs-.*dtc/# &:/' scripts/Makefile.host
+            sed -i '/dtc-objs/d' scripts/Makefile.host
+          fi
+          
+          # 7. 验证修复结果
+          echo ""
+          echo "修复后的 DTC 目录内容:"
+          ls -la scripts/dtc/
+          echo ""
+          echo "DTC 版本:"
+          scripts/dtc/dtc --version
+          echo ""
+          echo "scripts/Makefile.host 中的 DTC 相关行:"
+          grep -n "dtc" scripts/Makefile.host || echo "  (无 DTC 相关行)"
+          
+          echo ""
+          echo "=== DTC 修复完成 ==="
 
       - name: Fix sign-file
         run: |
