@@ -1,24 +1,24 @@
-name: Build Docker Kernel for Redmi 6 Pro (sakura) - Ubuntu 22.04 Full
+name: Build Docker Kernel for Redmi 6 Pro (sakura)
 
 on:
   workflow_dispatch:
     inputs:
       kernel_repo:
-        description: "内核源码仓库"
+        description: '内核源码仓库'
         required: true
-        default: "https://github.com/Redmi6pro-development/android_kernel_xiaomi_sakura.git"
+        default: 'https://github.com/Redmi6pro-development/android_kernel_xiaomi_sakura.git'
       kernel_branch:
-        description: "内核分支"
+        description: '内核分支'
         required: true
-        default: "lineage-17.0"
+        default: 'lineage-17.0'
       defconfig:
-        description: "内核配置文件名"
+        description: '内核配置文件名'
         required: true
-        default: "sakura_defconfig"
+        default: 'sakura_defconfig'
       build_release:
-        description: "是否创建 GitHub Release (true/false)"
+        description: '是否创建 GitHub Release (true/false)'
         required: true
-        default: "false"
+        default: 'false'
 
 env:
   KERNEL_NAME: sakura-docker-kernel
@@ -28,55 +28,59 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 120
 
     steps:
-      - name: Checkout workflow repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Free up disk space
         run: |
-          set -eux
           sudo rm -rf /usr/share/dotnet || true
           sudo rm -rf /usr/local/lib/android || true
           sudo rm -rf /opt/ghc || true
           sudo apt-get clean
           df -h
 
-      - name: Install dependencies (GCC-9 toolchain for old kernel)
+      - name: Install dependencies
         run: |
-          set -eux
           sudo apt-get update
-          sudo apt-get install -y software-properties-common
           sudo apt-get install -y \
             gcc-9 g++-9 \
             gcc-9-aarch64-linux-gnu g++-9-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu \
-            device-tree-compiler libfdt-dev \
-            flex bison bc ccache rsync \
-            libssl-dev libelf-dev \
-            libncurses5-dev libncursesw5-dev \
-            python3 git zip unzip wget curl jq
+            device-tree-compiler \
+            libfdt-dev \
+            flex \
+            bison \
+            libssl-dev \
+            libelf-dev \
+            bc \
+            ccache \
+            libncurses5-dev \
+            libncursesw5-dev \
+            python3 \
+            git \
+            zip \
+            unzip \
+            wget \
+            curl
 
-      - name: Toolchain verify
+      - name: Verify toolchain
         run: |
-          set -eux
           aarch64-linux-gnu-gcc-9 --version
           gcc-9 --version
-          ld --version | head -n1
           dtc --version
           python3 --version
           echo "libfdt headers:"
-          ls /usr/include/libfdt*.h || true
+          ls /usr/include/libfdt*.h 2>/dev/null || echo "libfdt headers not found"
 
       - name: Clone kernel source
         run: |
-          set -eux
           git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" \
             "${{ github.event.inputs.kernel_repo }}" kernel
           cd kernel
-          git log --oneline -1
-          du -sh .
+          echo "Kernel source cloned successfully"
           ls -la
 
       - name: Cache ccache
@@ -88,34 +92,29 @@ jobs:
             ${{ runner.os }}-ccache-${{ github.event.inputs.kernel_branch }}-
             ${{ runner.os }}-ccache-
 
-      - name: Setup build env
+      - name: Setup environment
         run: |
-          set -eux
-          {
-            echo "ARCH=arm64"
-            echo "SUBARCH=arm64"
-            echo "CROSS_COMPILE=aarch64-linux-gnu-"
-            echo "CC=aarch64-linux-gnu-gcc-9"
-            echo "CXX=aarch64-linux-gnu-g++-9"
-            echo "HOSTCC=gcc-9"
-            echo "HOSTCXX=g++-9"
-            echo "CCACHE_DIR=$HOME/.ccache"
-            echo "CCACHE_MAXSIZE=6G"
-            echo "KBUILD_BUILD_USER=github-actions"
-            echo "KBUILD_BUILD_HOST=ubuntu-22.04"
-          } >> "$GITHUB_ENV"
-          ccache -M 6G
-          ccache -s || true
+          echo "ARCH=arm64" >> $GITHUB_ENV
+          echo "SUBARCH=arm64" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CC=aarch64-linux-gnu-gcc-9" >> $GITHUB_ENV
+          echo "CXX=aarch64-linux-gnu-g++-9" >> $GITHUB_ENV
+          echo "HOSTCC=gcc-9" >> $GITHUB_ENV
+          echo "HOSTCXX=g++-9" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
+          ccache -M 5G
 
-      - name: Patch python compatibility
+      - name: Fix gcc-wrapper.py
         run: |
-          set -eux
           cd kernel
-          # 1) shebang 统一 python3
+          # 将 scripts 下 python shebang 改为 python3（若存在）
           grep -RIl "^#!/usr/bin/env python$" scripts 2>/dev/null | xargs -r sed -i '1s|python$|python3|'
-          # 2) 修复 gcc-wrapper.py（旧内核常见）
+
           if [ -f scripts/gcc-wrapper.py ]; then
+            echo "=== 修复 gcc-wrapper.py ==="
             cp scripts/gcc-wrapper.py scripts/gcc-wrapper.py.bak || true
+
             cat > scripts/gcc-wrapper.py << 'PYEOF'
 #!/usr/bin/env python3
 import sys
@@ -123,81 +122,98 @@ import subprocess
 
 def main():
     args = sys.argv[1:]
-    p = subprocess.Popen(args, stderr=subprocess.PIPE)
-    for line in p.stderr:
-      if isinstance(line, bytes):
-        line = line.decode("utf-8", errors="replace")
-      sys.stderr.write(line)
-    return p.wait()
+    proc = subprocess.Popen(args, stderr=subprocess.PIPE)
+    for line in proc.stderr:
+        if isinstance(line, bytes):
+            line = line.decode('utf-8', errors='replace')
+        sys.stderr.write(line)
+    return proc.wait()
 
 if __name__ == "__main__":
     sys.exit(main())
 PYEOF
+
             chmod +x scripts/gcc-wrapper.py
-            python3 -m py_compile scripts/gcc-wrapper.py
+            python3 -m py_compile scripts/gcc-wrapper.py && echo "gcc-wrapper.py syntax OK"
           fi
 
-      - name: Use system DTC (keep libfdt)
+      - name: Fix DTC
         run: |
-          set -eux
           cd kernel
+          echo "=== 使用系统 DTC，保留内核 libfdt ==="
           if [ -d scripts/dtc ]; then
             cp /usr/bin/dtc scripts/dtc/dtc
             chmod +x scripts/dtc/dtc
-            scripts/dtc/dtc --version || true
+            scripts/dtc/dtc --version
           fi
 
-      - name: Apply sakura docker patches
+      - name: Fix sign-file / extract-cert (openssl3 compatibility)
         run: |
-          set -eux
           cd kernel
+          # 先关闭配置层面的签名能力（推荐）
+          if [ -f .config ]; then
+            scripts/config --disable CONFIG_MODULE_SIG || true
+            scripts/config --disable CONFIG_MODULE_SIG_ALL || true
+            scripts/config --disable CONFIG_SYSTEM_TRUSTED_KEYRING || true
+            scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS "" || true
+            scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS "" || true
+          fi
 
-          # Patch 1: kernel/Makefile for config_data.gz
+          # 再做构建目标层面双保险
+          if [ -f scripts/Makefile ]; then
+            sed -i 's/^hostprogs-$(CONFIG_MODULE_SIG).*/# &/' scripts/Makefile || true
+            sed -i 's/^hostprogs-$(CONFIG_SYSTEM_TRUSTED_KEYRING).*/# &/' scripts/Makefile || true
+          fi
+
+      - name: Apply kernel/Makefile patch
+        run: |
+          cd kernel
           sed -i 's|$(obj)/config_data.gz: arch/arm64/configs/sakura_defconfig FORCE|$(obj)/config_data.gz: $(KCONFIG_CONFIG) FORCE|' kernel/Makefile || true
+          echo "kernel/Makefile patched"
 
-          # Patch 2: xt_qtaguid anti-reboot patch
+      - name: Apply xt_qtaguid.c patch
+        run: |
+          cd kernel
           if [ -f net/netfilter/xt_qtaguid.c ]; then
-            sed -i 's/struct rtnl_link_stats64 dev_stats, \*stats;/struct rtnl_link_stats64 *stats;/' net/netfilter/xt_qtaguid.c || true
-            sed -i '/iface_entry = list_entry(v, struct iface_stat, list);/a\ \ stats = \&no_dev_stats;' net/netfilter/xt_qtaguid.c || true
-            sed -i '/if (iface_entry->active) {/,/}/d' net/netfilter/xt_qtaguid.c || true
+            sed -i 's/struct rtnl_link_stats64 dev_stats, \*stats;/struct rtnl_link_stats64 *stats;/' net/netfilter/xt_qtaguid.c
+            sed -i '/iface_entry = list_entry(v, struct iface_stat, list);/a\ \ stats = \&no_dev_stats;' net/netfilter/xt_qtaguid.c
+            sed -i '/if (iface_entry->active) {/,/}/d' net/netfilter/xt_qtaguid.c
+            echo "xt_qtaguid.c patched"
+          else
+            echo "xt_qtaguid.c not found, skipping patch"
           fi
 
-      - name: Configure kernel (openssl3 safe + docker required)
+      - name: Configure kernel
         run: |
-          set -eux
           cd kernel
-
+          make clean
           make mrproper
           make "${{ github.event.inputs.defconfig }}" \
             CC=aarch64-linux-gnu-gcc-9 HOSTCC=gcc-9 HOSTCXX=g++-9
 
-          # --- OpenSSL 3.0 兼容：关闭模块签名路径 ---
+          echo "=========================================="
+          echo "启用 Docker 必需的内核配置（覆盖 defconfig）"
+          echo "=========================================="
+
           scripts/config --disable CONFIG_MODULE_SIG || true
           scripts/config --disable CONFIG_MODULE_SIG_ALL || true
           scripts/config --disable CONFIG_SYSTEM_TRUSTED_KEYRING || true
           scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS "" || true
           scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS "" || true
 
-          # 双保险：scripts/Makefile 跳过 sign-file / extract-cert
-          if [ -f scripts/Makefile ]; then
-            sed -i 's/^hostprogs-$(CONFIG_MODULE_SIG).*/# &/' scripts/Makefile || true
-            sed -i 's/^hostprogs-$(CONFIG_SYSTEM_TRUSTED_KEYRING).*/# &/' scripts/Makefile || true
-          fi
-
-          # --- Docker required ---
-          # Namespaces
+          # ------ 命名空间 ------
           scripts/config --enable CONFIG_NAMESPACES
           scripts/config --enable CONFIG_NET_NS
           scripts/config --enable CONFIG_PID_NS
-          scripts/config --enable CONFIG_IPC_NS
           scripts/config --enable CONFIG_UTS_NS
           scripts/config --enable CONFIG_USER_NS
+          scripts/config --enable CONFIG_IPC_NS
 
-          # IPC
+          # ------ IPC ------
           scripts/config --enable CONFIG_SYSVIPC
           scripts/config --enable CONFIG_POSIX_MQUEUE
 
-          # Cgroups
+          # ------ Cgroups ------
           scripts/config --enable CONFIG_CGROUPS
           scripts/config --enable CONFIG_CGROUP_CPUACCT
           scripts/config --enable CONFIG_CGROUP_DEVICE
@@ -215,12 +231,12 @@ PYEOF
           scripts/config --enable CONFIG_CGROUP_NET_CLASSID
           scripts/config --enable CONFIG_CGROUP_BPF
 
-          # BPF
+          # ------ BPF ------
           scripts/config --enable CONFIG_BPF
           scripts/config --enable CONFIG_BPF_SYSCALL
           scripts/config --enable CONFIG_BPF_JIT
 
-          # Network / NAT
+          # ------ 网络 ------
           scripts/config --enable CONFIG_VETH
           scripts/config --enable CONFIG_BRIDGE
           scripts/config --enable CONFIG_BRIDGE_NETFILTER
@@ -238,13 +254,19 @@ PYEOF
           scripts/config --enable CONFIG_NF_NAT_MASQUERADE_IPV4
           scripts/config --enable CONFIG_NF_NAT_MASQUERADE_IPV6
 
-          # Storage
+          # ------ IPVS ------
+          scripts/config --enable CONFIG_IP_VS
+          scripts/config --enable CONFIG_IP_VS_NFCT
+          scripts/config --enable CONFIG_IP_VS_PROTO_TCP
+          scripts/config --enable CONFIG_IP_VS_PROTO_UDP
+          scripts/config --enable CONFIG_IP_VS_RR
+
+          # ------ 存储 ------
           scripts/config --enable CONFIG_OVERLAY_FS
           scripts/config --enable CONFIG_EXT4_FS
           scripts/config --enable CONFIG_EXT4_FS_POSIX_ACL
           scripts/config --enable CONFIG_EXT4_FS_SECURITY
 
-          # Others
           scripts/config --enable CONFIG_DEVPTS_MULTIPLE_INSTANCES
           scripts/config --enable CONFIG_KEYS
 
@@ -252,76 +274,52 @@ PYEOF
 
       - name: Build kernel
         run: |
-          set -euxo pipefail
           cd kernel
           make -j"$(nproc)" \
             CC=aarch64-linux-gnu-gcc-9 \
             HOSTCC=gcc-9 HOSTCXX=g++-9 \
             Image.gz-dtb 2>&1 | tee build.log
 
-      - name: Check output
-        id: check_output
-        run: |
-          set -eux
-          if [ -f kernel/arch/arm64/boot/Image.gz-dtb ]; then
-            echo "built=true" >> "$GITHUB_OUTPUT"
-            ls -lh kernel/arch/arm64/boot/Image.gz-dtb
+          if [ -f arch/arm64/boot/Image.gz-dtb ]; then
+            echo "✅ Kernel compiled successfully!"
+            ls -lh arch/arm64/boot/Image.gz-dtb
           else
-            echo "built=false" >> "$GITHUB_OUTPUT"
+            echo "❌ Kernel compilation failed!"
+            tail -100 build.log
+            exit 1
           fi
 
-      - name: Pack AnyKernel3
-        if: steps.check_output.outputs.built == 'true'
+      - name: Clone AnyKernel3 and pack
         run: |
-          set -eux
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
           cp kernel/arch/arm64/boot/Image.gz-dtb AnyKernel3/
           cd AnyKernel3
 
-          # 尽量兼容不同 anykernel.sh 变量名
+          # 使用常见可识别字段
           sed -i 's|^do.devicecheck=.*|do.devicecheck=1|' anykernel.sh || true
           sed -i 's|^do.modules=.*|do.modules=0|' anykernel.sh || true
           sed -i 's|^do.systemless=.*|do.systemless=1|' anykernel.sh || true
           sed -i 's|^device.name1=.*|device.name1=sakura|' anykernel.sh || true
           sed -i 's|^device.name2=.*|device.name2=Redmi6Pro|' anykernel.sh || true
-          sed -i 's|^kernel.string=.*|kernel.string=DockerKernel-22.04CI|' anykernel.sh || true
+          sed -i 's|^kernel.string=.*|kernel.string=DockerKernel|' anykernel.sh || true
 
           zip -r "../${{ env.KERNEL_NAME }}.zip" ./*
+          echo "✅ Kernel packaged successfully!"
 
-      - name: Collect debug artifacts (always)
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.KERNEL_NAME }}
+          path: ${{ env.KERNEL_NAME }}.zip
+          retention-days: 90
+
+      - name: Upload debug logs (always)
         if: always()
         run: |
-          set -eux
           mkdir -p out-debug
-          # 核心日志和配置
           [ -f kernel/build.log ] && cp kernel/build.log out-debug/ || true
           [ -f kernel/.config ] && cp kernel/.config out-debug/ || true
-          [ -f kernel/.config.old ] && cp kernel/.config.old out-debug/ || true
-          [ -f kernel/kernel/Makefile ] && cp kernel/kernel/Makefile out-debug/kernel.Makefile.patched || true
-          [ -f kernel/net/netfilter/xt_qtaguid.c ] && cp kernel/net/netfilter/xt_qtaguid.c out-debug/xt_qtaguid.c.patched || true
-          [ -f kernel/scripts/Makefile ] && cp kernel/scripts/Makefile out-debug/scripts.Makefile || true
-          [ -f kernel/scripts/gcc-wrapper.py ] && cp kernel/scripts/gcc-wrapper.py out-debug/ || true
-
-          # 关键信息快照
-          {
-            echo "=== ENV ==="
-            env | sort
-            echo
-            echo "=== TOOLCHAIN ==="
-            aarch64-linux-gnu-gcc-9 --version || true
-            gcc-9 --version || true
-            dtc --version || true
-            python3 --version || true
-            echo
-            echo "=== LAST 300 LINES OF BUILD LOG ==="
-            tail -n 300 kernel/build.log || true
-          } > out-debug/debug-summary.txt
-
-          # Docker 关键 config 提取
-          if [ -f kernel/.config ]; then
-            grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|CGROUPS|MEMCG|CPUSETS|CFS_BANDWIDTH|VETH|BRIDGE|BRIDGE_NETFILTER|NF_NAT|OVERLAY_FS|EXT4_FS|BPF|BPF_SYSCALL|DEVPTS_MULTIPLE_INSTANCES|KEYS)" kernel/.config \
-              > out-debug/docker-config-check.txt || true
-          fi
+          tail -n 300 kernel/build.log > out-debug/build.tail.log 2>/dev/null || true
 
       - name: Upload debug artifact (always)
         if: always()
@@ -331,16 +329,8 @@ PYEOF
           path: out-debug
           retention-days: 30
 
-      - name: Upload kernel artifact
-        if: steps.check_output.outputs.built == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.KERNEL_NAME }}
-          path: ${{ env.KERNEL_NAME }}.zip
-          retention-days: 90
-
       - name: Create Release
-        if: ${{ steps.check_output.outputs.built == 'true' && github.event.inputs.build_release == 'true' }}
+        if: ${{ success() && github.event.inputs.build_release == 'true' }}
         uses: softprops/action-gh-release@v1
         with:
           files: ${{ env.KERNEL_NAME }}.zip
@@ -348,33 +338,32 @@ PYEOF
           name: Docker Kernel Build ${{ github.run_number }}
           body: |
             ## Docker Kernel for Redmi 6 Pro (sakura)
-            - Runner: Ubuntu 22.04
-            - Repo: ${{ github.event.inputs.kernel_repo }}
-            - Branch: ${{ github.event.inputs.kernel_branch }}
-            - Defconfig: ${{ github.event.inputs.defconfig }}
 
-            ### Included
-            - kernel/Makefile config_data patch
-            - xt_qtaguid anti-reboot patch
-            - OpenSSL3-compatible build flow (disable module signing path)
-            - GCC-9 pinned toolchain for old kernel compatibility
+            ### 内核信息
+            - 基于: ${{ github.event.inputs.kernel_repo }}
+            - 分支: ${{ github.event.inputs.kernel_branch }}
+            - 配置: ${{ github.event.inputs.defconfig }}
+
+            ### Docker支持
+            - 已开启Docker相关核心配置
+            - 已应用kernel/Makefile补丁
+            - 已应用xt_qtaguid.c防重启补丁
+            - GCC9 + Ubuntu22.04 兼容构建
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Summary
         if: always()
         run: |
-          {
-            echo "## 编译摘要"
-            echo "- 内核源码: ${{ github.event.inputs.kernel_repo }}"
-            echo "- 分支: ${{ github.event.inputs.kernel_branch }}"
-            echo "- 配置: ${{ github.event.inputs.defconfig }}"
-            echo "- Runner: ubuntu-22.04"
-            if [ "${{ steps.check_output.outputs.built }}" = "true" ]; then
-              echo "- 状态: ✅ 成功"
-              echo "- 内核包: ${{ env.KERNEL_NAME }}.zip"
-            else
-              echo "- 状态: ❌ 失败"
-              echo "- 已上传: debug-logs-${{ github.run_number }}"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "## 编译摘要" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 内核源码: ${{ github.event.inputs.kernel_repo }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 分支: ${{ github.event.inputs.kernel_branch }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 配置: ${{ github.event.inputs.defconfig }}" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f kernel/arch/arm64/boot/Image.gz-dtb ]; then
+            echo "- 状态: ✅ 成功" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 输出: ${{ env.KERNEL_NAME }}.zip" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- 状态: ❌ 失败" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 调试日志: debug-logs-${{ github.run_number }}" >> "$GITHUB_STEP_SUMMARY"
+          fi
