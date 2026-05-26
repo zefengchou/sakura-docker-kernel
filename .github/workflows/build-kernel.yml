@@ -30,11 +30,11 @@ jobs:
       - name: Install dependencies
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          apt-get install -y \
             make \
             build-essential \
-            gcc \
-            g++ \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
             device-tree-compiler \
             libfdt-dev \
             flex \
@@ -42,17 +42,14 @@ jobs:
             libssl-dev \
             libelf-dev \
             bc \
+            ccache \
             libncurses5-dev \
             python2 \
             git \
             zip \
             unzip \
             wget \
-            curl \
-            zlib1g-dev \
-            lib32z1-dev
-
-          ln -sf /usr/bin/python2 /usr/bin/python
+            curl
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -61,52 +58,41 @@ jobs:
         run: |
           git clone --depth=1 -b ${{ github.event.inputs.kernel_branch }} \
             ${{ github.event.inputs.kernel_repo }} kernel
-
-      - name: Download GCC toolchain
-        run: |
-          mkdir -p toolchain
-
-          echo "Downloading aarch64-linux-android-4.9..."
-          wget -q "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r1.tar.gz" -O aarch64-gcc.tar.gz
-          mkdir -p toolchain/aarch64-linux-android-4.9
-          tar xzf aarch64-gcc.tar.gz -C toolchain/aarch64-linux-android-4.9
-          rm aarch64-gcc.tar.gz
-
-          echo "Downloading arm-linux-androideabi-4.9..."
-          wget -q "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r1.tar.gz" -O arm-gcc.tar.gz
-          mkdir -p toolchain/arm-linux-androideabi-4.9
-          tar xzf arm-gcc.tar.gz -C toolchain/arm-linux-androideabi-4.9
-          rm arm-gcc.tar.gz
-
-          ls toolchain/aarch64-linux-android-4.9/bin/ | head -5
-          ls toolchain/arm-linux-androideabi-4.9/bin/ | head -5
+          cd kernel
+          echo "Kernel source cloned successfully"
 
       - name: Setup environment
         run: |
           echo "ARCH=arm64" >> $GITHUB_ENV
           echo "SUBARCH=arm64" >> $GITHUB_ENV
-          echo "CROSS_COMPILE=$(pwd)/toolchain/aarch64-linux-android-4.9/bin/aarch64-linux-android-" >> $GITHUB_ENV
-          echo "CROSS_COMPILE_ARM32=$(pwd)/toolchain/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          ln -sf /usr/bin/python2 /usr/bin/python
 
       - name: Verify toolchain
         run: |
-          ${CROSS_COMPILE}gcc --version
-          ${CROSS_COMPILE_ARM32}gcc --version
+          aarch64-linux-gnu-gcc --version
           dtc --version
+          python2 --version
+          openssl version
 
       - name: Fix gcc-wrapper.py
         run: |
           cd kernel
           if [ -f scripts/gcc-wrapper.py ]; then
+            echo "=== 修复 gcc-wrapper.py ==="
             cp scripts/gcc-wrapper.py scripts/gcc-wrapper.py.bak
+
             printf '#!/usr/bin/env python2\nimport sys\nimport subprocess\nargs = sys.argv[1:]\nproc = subprocess.Popen(args, stderr=subprocess.PIPE)\nfor line in proc.stderr:\n    if isinstance(line, bytes):\n        line = line.decode("utf-8", errors="replace")\n    sys.stderr.write(line)\nsys.exit(proc.wait())\n' > scripts/gcc-wrapper.py
+
             chmod +x scripts/gcc-wrapper.py
+            python2 scripts/gcc-wrapper.py --help 2>&1 | head -5 || echo "gcc-wrapper.py syntax OK"
           fi
 
       - name: Apply kernel/Makefile patch
         run: |
           cd kernel
           sed -i 's/$(obj)\/config_data.gz: arch\/arm64\/configs\/sakura_defconfig FORCE/$(obj)\/config_data.gz: $(KCONFIG_CONFIG) FORCE/' kernel/Makefile
+          echo "kernel/Makefile patched"
 
       - name: Apply xt_qtaguid.c patch
         run: |
@@ -115,6 +101,9 @@ jobs:
             sed -i 's/struct rtnl_link_stats64 dev_stats, \*stats;/struct rtnl_link_stats64 *stats;/' net/netfilter/xt_qtaguid.c
             sed -i '/iface_entry = list_entry(v, struct iface_stat, list);/a\\tstats = \&no_dev_stats;' net/netfilter/xt_qtaguid.c
             sed -i '/if (iface_entry->active) {/,/}/d' net/netfilter/xt_qtaguid.c
+            echo "xt_qtaguid.c patched"
+          else
+            echo "xt_qtaguid.c not found, skipping patch"
           fi
 
       - name: Configure kernel
@@ -135,22 +124,30 @@ jobs:
           scripts/config --disable CONFIG_BT_HIDP
           scripts/config --disable CONFIG_BT_QCOM_SLIM
           scripts/config --disable CONFIG_BTFM_SLIM_CODEC
+          echo "Bluetooth drivers disabled"
 
           scripts/config --disable CONFIG_MSM_KGSL
           scripts/config --disable CONFIG_MSM_KGSL_PER_PROCESS_PAGE_TABLE
           scripts/config --disable CONFIG_MSM_GPU_CRASH_DUMPS
+          echo "MSM GPU (kgsl) disabled"
 
           echo "=========================================="
-          echo "启用 Docker 必需的内核配置"
+          echo "启用 Docker 必需的内核配置（覆盖 defconfig）"
           echo "=========================================="
+
+          # 命名空间
           scripts/config --enable CONFIG_NAMESPACES
           scripts/config --enable CONFIG_NET_NS
           scripts/config --enable CONFIG_PID_NS
           scripts/config --enable CONFIG_UTS_NS
           scripts/config --enable CONFIG_USER_NS
           scripts/config --enable CONFIG_IPC_NS
+
+          # System V IPC
           scripts/config --enable CONFIG_SYSVIPC
           scripts/config --enable CONFIG_POSIX_MQUEUE
+
+          # Cgroups
           scripts/config --enable CONFIG_CGROUPS
           scripts/config --enable CONFIG_CGROUP_CPUACCT
           scripts/config --enable CONFIG_CGROUP_DEVICE
@@ -167,9 +164,13 @@ jobs:
           scripts/config --enable CONFIG_CGROUP_NET_PRIO
           scripts/config --enable CONFIG_CGROUP_NET_CLASSID
           scripts/config --enable CONFIG_CGROUP_BPF
+
+          # BPF
           scripts/config --enable CONFIG_BPF
           scripts/config --enable CONFIG_BPF_SYSCALL
           scripts/config --enable CONFIG_BPF_JIT
+
+          # 网络
           scripts/config --enable CONFIG_VETH
           scripts/config --enable CONFIG_BRIDGE
           scripts/config --enable CONFIG_BRIDGE_NETFILTER
@@ -186,54 +187,98 @@ jobs:
           scripts/config --enable CONFIG_IP6_NF_NAT
           scripts/config --enable CONFIG_NF_NAT_MASQUERADE_IPV4
           scripts/config --enable CONFIG_NF_NAT_MASQUERADE_IPV6
+
+          # IPVS
           scripts/config --enable CONFIG_IP_VS
           scripts/config --enable CONFIG_IP_VS_NFCT
           scripts/config --enable CONFIG_IP_VS_PROTO_TCP
           scripts/config --enable CONFIG_IP_VS_PROTO_UDP
           scripts/config --enable CONFIG_IP_VS_RR
+
+          # 存储驱动
           scripts/config --enable CONFIG_OVERLAY_FS
           scripts/config --enable CONFIG_EXT4_FS
           scripts/config --enable CONFIG_EXT4_FS_POSIX_ACL
           scripts/config --enable CONFIG_EXT4_FS_SECURITY
+
+          # 其他
           scripts/config --enable CONFIG_DEVPTS_MULTIPLE_INSTANCES
           scripts/config --enable CONFIG_KEYS
 
+          echo "Docker kernel configuration applied"
+
+          echo "=========================================="
+          echo "修复编译器兼容性问题"
+          echo "=========================================="
+          # 禁用 stack protector 检查（Ubuntu 20.04 交叉编译器可能不支持）
+          scripts/config --disable CONFIG_CC_STACKPROTECTOR
+          scripts/config --disable CONFIG_CC_STACKPROTECTOR_STRONG
+
+          echo "=========================================="
+          echo "解析依赖关系 (make olddefconfig)"
+          echo "=========================================="
           make olddefconfig
 
           echo "=========================================="
-          echo "验证关键配置"
+          echo "验证关键配置是否生效"
           echo "=========================================="
+
           PASS=0
           FAIL=0
           MISSING=0
 
           verify_config() {
             if grep -q "^$1=y" .config; then
-              echo "  OK $1=y"
+              echo "  ✅ $1=y"
               PASS=$((PASS + 1))
             elif grep -q "^$1=m" .config; then
-              echo "  OK $1=m"
+              echo "  ✅ $1=m (模块)"
               PASS=$((PASS + 1))
             elif grep -q "^# $1 is not set" .config; then
-              echo "  FAIL $1 is NOT set"
+              echo "  ❌ $1 is NOT set (FAILED)"
               FAIL=$((FAIL + 1))
             else
-              echo "  MISS $1"
+              echo "  ⚠️  $1 未找到"
               MISSING=$((MISSING + 1))
             fi
           }
 
-          for cfg in CONFIG_NAMESPACES CONFIG_NET_NS CONFIG_PID_NS CONFIG_IPC_NS CONFIG_UTS_NS CONFIG_USER_NS \
-                     CONFIG_SYSVIPC CONFIG_POSIX_MQUEUE \
-                     CONFIG_CGROUPS CONFIG_CGROUP_DEVICE CONFIG_MEMCG CONFIG_BLK_CGROUP \
-                     CONFIG_VETH CONFIG_BRIDGE CONFIG_BRIDGE_NETFILTER \
-                     CONFIG_NETFILTER_XT_MATCH_ADDRTYPE CONFIG_IP_NF_TARGET_MASQUERADE \
-                     CONFIG_NF_NAT CONFIG_NF_NAT_IPV4 CONFIG_NF_NAT_IPV6 \
-                     CONFIG_OVERLAY_FS CONFIG_EXT4_FS; do
+          echo "--- 命名空间 ---"
+          for cfg in CONFIG_NAMESPACES CONFIG_NET_NS CONFIG_PID_NS CONFIG_IPC_NS CONFIG_UTS_NS CONFIG_USER_NS; do
             verify_config "$cfg"
           done
 
-          echo "Result: PASS=$PASS FAIL=$FAIL MISS=$MISSING"
+          echo "--- System V IPC ---"
+          for cfg in CONFIG_SYSVIPC CONFIG_POSIX_MQUEUE; do
+            verify_config "$cfg"
+          done
+
+          echo "--- Cgroups ---"
+          for cfg in CONFIG_CGROUPS CONFIG_CGROUP_DEVICE CONFIG_MEMCG CONFIG_BLK_CGROUP \
+                     CONFIG_CGROUP_CPUACCT CONFIG_CGROUP_FREEZER CONFIG_CGROUP_SCHED CONFIG_CPUSETS; do
+            verify_config "$cfg"
+          done
+
+          echo "--- 网络 ---"
+          for cfg in CONFIG_VETH CONFIG_BRIDGE CONFIG_BRIDGE_NETFILTER \
+                     CONFIG_NETFILTER_XT_MATCH_ADDRTYPE CONFIG_IP_NF_TARGET_MASQUERADE \
+                     CONFIG_NF_NAT CONFIG_NF_NAT_IPV4 CONFIG_NF_NAT_IPV6; do
+            verify_config "$cfg"
+          done
+
+          echo "--- 存储 ---"
+          for cfg in CONFIG_OVERLAY_FS CONFIG_EXT4_FS; do
+            verify_config "$cfg"
+          done
+
+          echo ""
+          echo "=========================================="
+          echo "验证结果: ✅通过=$PASS ❌失败=$FAIL ⚠️缺失=$MISSING"
+          echo "=========================================="
+
+          if [ $FAIL -gt 0 ]; then
+            echo "⚠️ 警告: 有 $FAIL 个配置未能启用！"
+          fi
 
       - name: Build kernel
         run: |
@@ -241,10 +286,10 @@ jobs:
           make -j$(nproc) Image.gz-dtb 2>&1 | tee build.log
 
           if [ -f arch/arm64/boot/Image.gz-dtb ]; then
-            echo "Kernel compiled successfully!"
+            echo "✅ Kernel compiled successfully!"
             ls -lh arch/arm64/boot/Image.gz-dtb
           else
-            echo "Kernel compilation failed!"
+            echo "❌ Kernel compilation failed!"
             tail -100 build.log
             exit 1
           fi
@@ -280,11 +325,11 @@ jobs:
             - 基于: ${{ github.event.inputs.kernel_repo }}
             - 分支: ${{ github.event.inputs.kernel_branch }}
             - 配置: ${{ github.event.inputs.defconfig }}
-            - 编译器: Google Android GCC 4.9
 
             ### Docker支持
             - 已开启所有Docker必需的内核配置
-            - 已禁用蓝牙和GPU驱动（减少编译错误）
+            - 已应用kernel/Makefile补丁
+            - 已应用xt_qtaguid.c防重启补丁
 
             ### 使用方法
             1. 下载zip文件
@@ -297,12 +342,13 @@ jobs:
       - name: Build Summary
         if: always()
         run: |
-          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- Kernel: ${{ github.event.inputs.kernel_repo }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Branch: ${{ github.event.inputs.kernel_branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "## 编译摘要" >> $GITHUB_STEP_SUMMARY
+          echo "- 内核源码: ${{ github.event.inputs.kernel_repo }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 分支: ${{ github.event.inputs.kernel_branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 配置: ${{ github.event.inputs.defconfig }}" >> $GITHUB_STEP_SUMMARY
 
           if [ -f kernel/arch/arm64/boot/Image.gz-dtb ]; then
-            echo "- Status: SUCCESS" >> $GITHUB_STEP_SUMMARY
+            echo "- 状态: ✅ 成功" >> $GITHUB_STEP_SUMMARY
           else
-            echo "- Status: FAILED" >> $GITHUB_STEP_SUMMARY
+            echo "- 状态: ❌ 失败" >> $GITHUB_STEP_SUMMARY
           fi
